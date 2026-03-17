@@ -8,22 +8,28 @@ import numpy as np
 
 
 def strategy(df: pd.DataFrame) -> pd.Series:
-    """Momentum + BB + ADX with tuned parameters.
+    """Momentum + BB + ADX + Williams %R entry timing.
 
-    Tuning: ADX threshold 25 (stricter), ROC(15) for faster signals,
-    SMA(40) for slightly faster trend detection.
+    Core: ROC(20) momentum with SMA50 trend + ADX strength filter.
+    Enhancement: Williams %R for better entry timing.
+    BB mean reversion for range-bound markets.
     """
     close = df["close"]
     high = df["high"]
     low = df["low"]
 
-    # Trend filter (slightly faster)
-    sma40 = close.rolling(40).mean()
-    trend_up = close > sma40
-    trend_down = close < sma40
+    # Trend filter
+    sma50 = close.rolling(50).mean()
+    trend_up = close > sma50
+    trend_down = close < sma50
 
-    # Momentum (shorter lookback)
-    roc = close.pct_change(15)
+    # Momentum
+    roc = close.pct_change(20)
+
+    # Williams %R(14) - overbought/oversold oscillator
+    hh = high.rolling(14).max()
+    ll = low.rolling(14).min()
+    willr = -100 * (hh - close) / (hh - ll).replace(0, np.nan)
 
     # Bollinger Bands (20, 2)
     bb_mid = close.rolling(20).mean()
@@ -49,13 +55,15 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
     adx = dx.rolling(14).mean()
 
-    strong_trend = adx > 25  # Stricter threshold
+    strong_trend = adx > 20
 
     signals = pd.Series(0, index=df.index)
 
-    # Momentum signals only in strong trends
-    signals[trend_up & (roc > 0) & strong_trend] = 1
-    signals[trend_down & (roc < 0) & strong_trend] = -1
+    # Momentum + ADX signals, enhanced with Williams %R timing
+    # Long: uptrend + positive momentum + strong trend + not overbought
+    signals[trend_up & (roc > 0) & strong_trend & (willr < -20)] = 1
+    # Short: downtrend + negative momentum + strong trend + not oversold
+    signals[trend_down & (roc < 0) & strong_trend & (willr > -80)] = -1
 
     # BB mean reversion
     signals[trend_up & (close < bb_lower)] = 1
