@@ -29,7 +29,7 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     # Bollinger Bands (20, 2)
     bb_mid = close.rolling(20).mean()
     bb_std = close.rolling(20).std()
-    bb_lower = bb_mid - 2 * bb_std
+    bb_lower = bb_mid - 1.5 * bb_std
 
     # ADX(14) with DI
     plus_dm = high.diff()
@@ -51,7 +51,7 @@ def strategy(df: pd.DataFrame) -> pd.Series:
 
     # DI spread: how much stronger is +DI vs -DI
     di_spread = plus_di - minus_di
-    di_strong_bullish = di_spread > 13  # Very strong bullish DI spread
+    di_strong_bullish = di_spread > 12  # Very strong bullish DI spread
 
     strong_trend = adx > 20
 
