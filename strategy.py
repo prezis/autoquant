@@ -18,9 +18,9 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     high = df["high"]
     low = df["low"]
 
-    # Trend filter (EMA reacts faster to regime changes)
-    ema50 = close.ewm(span=50, adjust=False).mean()
-    trend_up = close > ema50
+    # Trend filter
+    sma50 = close.rolling(50).mean()
+    trend_up = close > sma50
 
     # Bollinger Bands (20, 2)
     bb_mid = close.rolling(20).mean()
@@ -52,7 +52,7 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     adx = dx.rolling(14).mean()
 
     di_spread = plus_di - minus_di
-    di_strong_bullish = di_spread > 12
+    di_strong_bullish = di_spread > 10
     strong_trend = adx > 20
 
     signals = pd.Series(0, index=df.index)
