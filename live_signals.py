@@ -47,7 +47,7 @@ from strategy import strategy, atr, LOOKBACK
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-MODEL_CACHE_DIR = Path.home() / ".cache" / "autoquant" / "models"
+BEST_MODEL_DIR = Path.home() / ".cache" / "autoquant" / "best_model"
 
 # Kolory ANSI
 GREEN = "\033[92m"
@@ -339,8 +339,9 @@ def generate_signals(send_tg: bool = False) -> list[dict]:
             for baro_name, baro_df in barometers.items():
                 context[baro_name] = baro_df
 
-            # Uruchom strategię (z cache modeli — retrenuje max raz na 23h)
-            signals = strategy(df, context, model_cache_dir=MODEL_CACHE_DIR)
+            # Uruchom strategię z najlepszymi modelami agenta (trenuje tylko jeśli brak plików)
+            signals = strategy(df, context, model_cache_dir=BEST_MODEL_DIR,
+                               model_retrain_hours=99999)
 
             # Ostatni sygnał = aktualny
             last_signal = signals.iloc[-1]

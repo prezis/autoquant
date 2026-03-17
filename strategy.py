@@ -27,6 +27,10 @@ ENSEMBLE_SEEDS_MODERATE = [42, 271, 404]    # 3 modele dla umiarkowanych (ETH, S
 ENSEMBLE_SEEDS_UNSTABLE = [42, 271, 404, 999, 137]  # 5 modeli dla XMR
 
 MODEL_RETRAIN_HOURS = 168  # retrenuj model jeśli starszy niż 7 dni
+BEST_MODEL_DIR = Path.home() / ".cache" / "autoquant" / "best_model"
+
+# Modele wytrenowane w aktualnej sesji (wypełniane przez strategy())
+_SESSION_MODELS: dict = {}  # asset_id -> [(model_info, seed), ...]
 
 
 # ─── Wskaźniki ───────────────────────────────────────────────────
@@ -499,15 +503,26 @@ def load_model(path: Path):
         return None
 
 
-def _model_fresh(path: Path) -> bool:
-    """Sprawdza czy model jest świeższy niż MODEL_RETRAIN_HOURS."""
+def _model_fresh(path: Path, max_hours: float = MODEL_RETRAIN_HOURS) -> bool:
+    """Sprawdza czy model jest świeższy niż max_hours."""
     if not path.exists():
         return False
     age_hours = (datetime.now().timestamp() - path.stat().st_mtime) / 3600
-    return age_hours < MODEL_RETRAIN_HOURS
+    return age_hours < max_hours
 
 
-def strategy(df, context, model_cache_dir=None):
+def save_best_models(model_dir: Path = BEST_MODEL_DIR):
+    """Zapisuje modele z aktualnej sesji jako najlepsze."""
+    model_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for asset, models in _SESSION_MODELS.items():
+        for model_info, seed in models:
+            save_model(model_info, model_dir / f"lstm_{asset}_s{seed}.pt")
+            count += 1
+    print(f"  🏆 Zapisano {count} modeli → {model_dir}")
+
+
+def strategy(df, context, model_cache_dir=None, model_retrain_hours=MODEL_RETRAIN_HOURS):
     """
     Hybrid per-asset: BTC=simple trend, reszta=rule-based × LSTM confidence scaler.
     LSTM z lookback 50 świec przetwarza sekwencję wskaźników technicznych.
@@ -546,19 +561,22 @@ def strategy(df, context, model_cache_dir=None):
 
     # Trenuj N modeli z różnymi seedami, uśrednij predykcje
     preds = []
+    session = []
     for seed in seeds:
         model_info = None
         if cache_dir:
             cache_path = cache_dir / f"lstm_{asset}_s{seed}.pt"
-            if _model_fresh(cache_path):
+            if _model_fresh(cache_path, max_hours=model_retrain_hours):
                 model_info = load_model(cache_path)
         if model_info is None:
             model_info = train_lstm(features.iloc[:te], fwd_ret.iloc[:te],
                                     lookback=LOOKBACK, n_epochs=300, lr=0.002, seed=seed)
             if cache_dir:
                 save_model(model_info, cache_path)
+        session.append((model_info, seed))
         pred = predict_lstm_confidence(model_info, features)
         preds.append(pred)
+    _SESSION_MODELS[asset] = session  # zachowaj dla save_best_models()
     nn_pred = sum(preds) / len(preds)
 
     # Czyste sygnały LSTM → pozycje
@@ -610,3 +628,9 @@ if __name__ == "__main__":
     with open(RESULTS_FILE, "a") as f:
         f.write(row + "\n")
     print(f"\n📊 Zapisano wynik #{nr} → {RESULTS_FILE}")
+
+    # Jeśli nowy rekord — zapisz modele jako najlepsze
+    with open(RESULTS_FILE) as f:
+        scores = [float(l.split("\t")[2]) for l in f.readlines()[1:] if l.strip()]
+    if scores and avg_score >= max(scores):
+        save_best_models(BEST_MODEL_DIR)
