@@ -32,7 +32,9 @@ Po każdej modyfikacji uruchom `python3 strategy.py` i sprawdź wynik.
 - Strategia: Dual MACD (12/26 + 8/17) + Ichimoku + EMA200 + ATR 1.9 trailing stop + cooldown 6 + profit target 3×ATR + chikou konfirmacja
 - Timeframe: 4H
 - Aktywa: BTC, ETH, XMR, SOL, TAO (long/short)
-- Barometry: SPY, QQQ, UUP (kontekst, nie handlowane)
+- Barometry ETF: SPY, QQQ, UUP, GLD (złoto), VIXY (VIX/strach)
+- Makro: FED_RATE (stopa Fed), CPI (inflacja), TREASURY_10Y, TREASURY_2Y
+- Wszystkie dostępne w `context` dict — używaj ich!
 
 ### Per-asset wyniki (problem!):
 - **SOL: 0.975** — doskonały, nie psuj
@@ -86,6 +88,28 @@ device = torch.device("cuda")  # RTX 4090
 # Normalizacja: StandardScaler fit na train, transform na val (BEZ data leakage!)
 # Output: sygnał [-1, 1] (continuous), threshold na pozycje
 # Trenuj PER-ASSET (każdy asset ma swój model)
+```
+
+### Nowe dane makro w context (UŻYWAJ ICH!)
+
+Agent Fazy 1 nie miał tych danych. Ty masz. Klucze w `context`:
+
+| Klucz | Typ | Co to | Jak użyć |
+|-------|-----|-------|----------|
+| `GLD` | ETF 1h | Złoto | Korelacja z BTC (store of value). GLD rośnie = pozytywne dla krypto |
+| `VIXY` | ETF 1h | VIX proxy | Strach. VIXY rośnie = risk-off = krypto spada. VIXY spada = risk-on = krypto rośnie |
+| `FED_RATE` | miesięczny | Stopa Fed | Rosnąca = hawkish = krypto spada. Malejąca = dovish = krypto rośnie. Reindex ffill do 4H |
+| `CPI` | miesięczny | Inflacja | Rosnąca = Fed zaostrza = źle dla krypto. Reindex ffill do 4H |
+| `TREASURY_10Y` | dzienny | Yield 10Y | Rosnący yield = presja na ryzykowne aktywa. Kluczowy driver! |
+| `TREASURY_2Y` | dzienny | Yield 2Y | Yield curve (10Y-2Y). Inwersja = recesja = risk-off |
+
+Przykład użycia makro:
+```python
+if "TREASURY_10Y" in context and len(context["TREASURY_10Y"]) > 50:
+    t10y = context["TREASURY_10Y"]["close"]
+    t10y = t10y.reindex(df.index, method="ffill")  # forward-fill do 4H
+    t10y_rising = t10y.diff(20) > 0  # yieldy rosną w ostatnich 20 barach
+    # Gdy yieldy rosną → osłab longi lub wzmocnij shorty
 ```
 
 ### Krok 3: Multi-timeframe (jeśli zostanie czas)
