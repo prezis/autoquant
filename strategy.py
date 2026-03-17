@@ -8,11 +8,10 @@ import numpy as np
 
 
 def strategy(df: pd.DataFrame) -> pd.Series:
-    """Momentum + Bollinger Bands + ATR volatility filter.
+    """Momentum + BB + ADX trend strength filter.
 
-    Core: ROC(20) momentum with SMA50 trend filter.
-    BB: Mean reversion at Bollinger Band extremes.
-    ATR: Go flat during extreme volatility to reduce drawdown.
+    Core: ROC(20) momentum with SMA50 trend filter + BB mean reversion.
+    ADX: Only take momentum trades when trend is strong (ADX > 20).
     """
     close = df["close"]
     high = df["high"]
@@ -32,29 +31,35 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     bb_upper = bb_mid + 2 * bb_std
     bb_lower = bb_mid - 2 * bb_std
 
-    # ATR(14) volatility filter
+    # ADX(14) - trend strength
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
     tr = pd.concat([
         high - low,
         (high - close.shift(1)).abs(),
         (low - close.shift(1)).abs()
     ], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean()
-    atr_pct = atr / close  # ATR as % of price
-    atr_avg = atr_pct.rolling(50).mean()
-    high_vol = atr_pct > (atr_avg * 1.8)  # Extreme volatility
+
+    atr14 = tr.rolling(14).mean()
+    plus_di = 100 * (plus_dm.rolling(14).mean() / atr14)
+    minus_di = 100 * (minus_dm.rolling(14).mean() / atr14)
+    dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
+    adx = dx.rolling(14).mean()
+
+    strong_trend = adx > 20
 
     signals = pd.Series(0, index=df.index)
 
-    # Base momentum signals
-    signals[trend_up & (roc > 0)] = 1
-    signals[trend_down & (roc < 0)] = -1
+    # Momentum signals only in strong trends
+    signals[trend_up & (roc > 0) & strong_trend] = 1
+    signals[trend_down & (roc < 0) & strong_trend] = -1
 
-    # Bollinger Band mean reversion overrides
+    # BB mean reversion (works in any regime)
     signals[trend_up & (close < bb_lower)] = 1
     signals[trend_down & (close > bb_upper)] = -1
-
-    # Go flat during extreme volatility
-    signals[high_vol] = 0
 
     return signals
 
