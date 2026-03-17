@@ -8,32 +8,23 @@ import numpy as np
 
 
 def strategy(df: pd.DataFrame) -> pd.Series:
-    """Momentum + BB + ADX/DI + MACD confirmation.
+    """Momentum + BB + ADX/DI with EMA trend filter.
 
-    Core: ROC(20) momentum with SMA50 trend + ADX/DI directional filter.
-    MACD: Additional momentum confirmation via MACD histogram.
+    Change: EMA50 instead of SMA50 for faster trend response.
+    Core: ROC(20) momentum + ADX/DI directional filter.
     BB mean reversion for range-bound markets.
     """
     close = df["close"]
     high = df["high"]
     low = df["low"]
 
-    # Trend filter
-    sma50 = close.rolling(50).mean()
-    trend_up = close > sma50
-    trend_down = close < sma50
+    # Trend filter: EMA50 (faster than SMA)
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    trend_up = close > ema50
+    trend_down = close < ema50
 
     # Momentum
     roc = close.pct_change(20)
-
-    # MACD (12, 26, 9)
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    macd_signal = macd_line.ewm(span=9, adjust=False).mean()
-    macd_hist = macd_line - macd_signal
-    macd_bullish = macd_hist > 0
-    macd_bearish = macd_hist < 0
 
     # Bollinger Bands (20, 2)
     bb_mid = close.rolling(20).mean()
@@ -65,9 +56,9 @@ def strategy(df: pd.DataFrame) -> pd.Series:
 
     signals = pd.Series(0, index=df.index)
 
-    # Momentum + ADX/DI + MACD triple confirmation
-    signals[trend_up & (roc > 0) & strong_trend & di_bullish & macd_bullish] = 1
-    signals[trend_down & (roc < 0) & strong_trend & di_bearish & macd_bearish] = -1
+    # Momentum signals with ADX + DI confirmation
+    signals[trend_up & (roc > 0) & strong_trend & di_bullish] = 1
+    signals[trend_down & (roc < 0) & strong_trend & di_bearish] = -1
 
     # BB mean reversion
     signals[trend_up & (close < bb_lower)] = 1
