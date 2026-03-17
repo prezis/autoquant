@@ -8,12 +8,12 @@ import numpy as np
 
 
 def strategy(df: pd.DataFrame) -> pd.Series:
-    """Long-only: SMA50 + ADX/DI(12) + BB + vol filter + RSI overbought filter.
+    """Long-only: SMA50 + ADX/DI(12) + BB + Keltner breakout + vol filter.
 
     Core: SMA50 trend + ADX>20 + DI spread>12.
     BB for dip-buying in uptrend.
+    Keltner: Extra long on breakout above upper channel.
     Regime: Go flat when realized vol is extreme (> 2x median).
-    RSI filter: Avoid entering when RSI>70 (overbought).
     """
     close = df["close"]
     high = df["high"]
@@ -56,23 +56,20 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     di_strong_bullish = di_spread > 12
     strong_trend = adx > 20
 
-    # RSI(14) overbought filter
-    delta = close.diff()
-    gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    not_overbought = rsi < 70
-
     signals = pd.Series(0, index=df.index)
 
-    # Primary: DI spread + uptrend + ADX confirmation + not overbought
-    signals[trend_up & strong_trend & di_strong_bullish & not_overbought] = 1
+    # Primary: DI spread + uptrend + ADX confirmation
+    signals[trend_up & strong_trend & di_strong_bullish] = 1
 
     # BB oversold bounce in uptrend
     signals[trend_up & (close < bb_lower)] = 1
 
-    # Go flat during extreme volatility or overbought
+    # Keltner Channel breakout: close above EMA20 + 1.5*ATR
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    keltner_upper = ema20 + 1.5 * atr14
+    signals[trend_up & (close > keltner_upper) & strong_trend] = 1
+
+    # Go flat during extreme volatility
     signals[extreme_vol] = 0
 
     return signals
