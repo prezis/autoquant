@@ -8,11 +8,11 @@ import numpy as np
 
 
 def strategy(df: pd.DataFrame) -> pd.Series:
-    """Momentum + BB + ADX + DI directional confirmation.
+    """Long-only momentum with ADX/DI trend filter (simplified).
 
-    Core: ROC(20) momentum with SMA50 trend filter + BB mean reversion.
-    ADX: Only trade strong trends (ADX > 20).
-    DI: Use +DI/-DI to confirm direction matches signal.
+    Core: ROC(20) momentum with SMA50 trend filter.
+    ADX/DI: Only go long in strong uptrends confirmed by DI.
+    Removed BB for simplicity.
     """
     close = df["close"]
     high = df["high"]
@@ -21,16 +21,9 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     # Trend filter
     sma50 = close.rolling(50).mean()
     trend_up = close > sma50
-    trend_down = close < sma50
 
     # Momentum
     roc = close.pct_change(20)
-
-    # Bollinger Bands (20, 2)
-    bb_mid = close.rolling(20).mean()
-    bb_std = close.rolling(20).std()
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
 
     # ADX(14) with DI
     plus_dm = high.diff()
@@ -52,16 +45,11 @@ def strategy(df: pd.DataFrame) -> pd.Series:
 
     strong_trend = adx > 20
     di_bullish = plus_di > minus_di
-    di_bearish = minus_di > plus_di
 
     signals = pd.Series(0, index=df.index)
 
-    # Long-only momentum with ADX + DI confirmation
+    # Long-only: uptrend + positive momentum + strong ADX + DI bullish
     signals[trend_up & (roc > 0) & strong_trend & di_bullish] = 1
-    # Flat (not short) when conditions not met
-
-    # BB mean reversion (long only)
-    signals[trend_up & (close < bb_lower)] = 1
 
     return signals
 
