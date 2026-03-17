@@ -18,9 +18,10 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     high = df["high"]
     low = df["low"]
 
-    # Trend filter
+    # Trend filter: dual SMA for robustness
+    sma20 = close.rolling(20).mean()
     sma50 = close.rolling(50).mean()
-    trend_up = close > sma50
+    trend_up = (close > sma50) & (sma20 > sma50)
 
     # Bollinger Bands (20, 2)
     bb_mid = close.rolling(20).mean()
@@ -31,7 +32,7 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     daily_ret = close.pct_change()
     vol20 = daily_ret.rolling(20).std()
     vol_median = vol20.rolling(252).median()  # 1-year median vol
-    extreme_vol = vol20 > (vol_median * 2.5)
+    extreme_vol = vol20 > (vol_median * 2.0)
 
     # ADX(14) with DI
     plus_dm = high.diff()
