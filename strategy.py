@@ -52,21 +52,20 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     adx = dx.rolling(14).mean()
 
     di_spread = plus_di - minus_di
+    di_strong_bullish = di_spread > 12
     strong_trend = adx > 20
-
-    # Adaptive DI threshold: lower in calm markets, higher in volatile
-    low_vol = vol20 < vol_median  # below-median vol = calm
-    di_ok = pd.Series(False, index=df.index)
-    di_ok[low_vol & (di_spread > 8)] = True   # looser in calm regimes
-    di_ok[~low_vol & (di_spread > 12)] = True  # stricter in volatile
 
     signals = pd.Series(0, index=df.index)
 
-    # Primary: adaptive DI + uptrend + ADX confirmation
-    signals[trend_up & strong_trend & di_ok] = 1
+    # Primary: DI spread + uptrend + ADX confirmation
+    signals[trend_up & strong_trend & di_strong_bullish] = 1
 
     # BB oversold bounce in uptrend
     signals[trend_up & (close < bb_lower)] = 1
+
+    # SMA50 pullback: price near SMA50 support in strong trend
+    near_sma50 = (close / sma50 - 1).abs() < 0.02
+    signals[near_sma50 & strong_trend & (di_spread > 5)] = 1
 
     # Go flat during extreme volatility
     signals[extreme_vol] = 0
