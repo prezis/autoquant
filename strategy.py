@@ -8,11 +8,11 @@ import numpy as np
 
 
 def strategy(df: pd.DataFrame) -> pd.Series:
-    """Momentum + BB + ADX + Williams %R entry timing.
+    """Momentum + BB + ADX + DI directional confirmation.
 
-    Core: ROC(20) momentum with SMA50 trend + ADX strength filter.
-    Enhancement: Williams %R for better entry timing.
-    BB mean reversion for range-bound markets.
+    Core: ROC(20) momentum with SMA50 trend filter + BB mean reversion.
+    ADX: Only trade strong trends (ADX > 20).
+    DI: Use +DI/-DI to confirm direction matches signal.
     """
     close = df["close"]
     high = df["high"]
@@ -26,18 +26,13 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     # Momentum
     roc = close.pct_change(20)
 
-    # Williams %R(14) - overbought/oversold oscillator
-    hh = high.rolling(14).max()
-    ll = low.rolling(14).min()
-    willr = -100 * (hh - close) / (hh - ll).replace(0, np.nan)
-
     # Bollinger Bands (20, 2)
     bb_mid = close.rolling(20).mean()
     bb_std = close.rolling(20).std()
     bb_upper = bb_mid + 2 * bb_std
     bb_lower = bb_mid - 2 * bb_std
 
-    # ADX(14)
+    # ADX(14) with DI
     plus_dm = high.diff()
     minus_dm = -low.diff()
     plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
@@ -56,14 +51,14 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     adx = dx.rolling(14).mean()
 
     strong_trend = adx > 20
+    di_bullish = plus_di > minus_di
+    di_bearish = minus_di > plus_di
 
     signals = pd.Series(0, index=df.index)
 
-    # Momentum + ADX signals, enhanced with Williams %R timing
-    # Long: uptrend + positive momentum + strong trend + not overbought
-    signals[trend_up & (roc > 0) & strong_trend & (willr < -20)] = 1
-    # Short: downtrend + negative momentum + strong trend + not oversold
-    signals[trend_down & (roc < 0) & strong_trend & (willr > -80)] = -1
+    # Momentum signals with ADX + DI confirmation
+    signals[trend_up & (roc > 0) & strong_trend & di_bullish] = 1
+    signals[trend_down & (roc < 0) & strong_trend & di_bearish] = -1
 
     # BB mean reversion
     signals[trend_up & (close < bb_lower)] = 1
