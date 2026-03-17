@@ -8,12 +8,12 @@ import numpy as np
 
 
 def strategy(df: pd.DataFrame) -> pd.Series:
-    """Long-only: SMA50 + ADX/DI(12) + BB + vol filter + DI momentum.
+    """Long-only: SMA50 + ADX/DI(12) + BB + vol filter + RSI overbought filter.
 
     Core: SMA50 trend + ADX>20 + DI spread>12.
     BB for dip-buying in uptrend.
-    Vol filter: go flat in extreme volatility.
-    Extra: Go long when DI spread is rising fast (DI momentum).
+    Regime: Go flat when realized vol is extreme (> 2x median).
+    RSI filter: Avoid entering when RSI>70 (overbought).
     """
     close = df["close"]
     high = df["high"]
@@ -28,10 +28,10 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     bb_std = close.rolling(20).std()
     bb_lower = bb_mid - 2 * bb_std
 
-    # Volatility regime
+    # Volatility regime: 20-day realized vol
     daily_ret = close.pct_change()
     vol20 = daily_ret.rolling(20).std()
-    vol_median = vol20.rolling(252).median()
+    vol_median = vol20.rolling(252).median()  # 1-year median vol
     extreme_vol = vol20 > (vol_median * 2.0)
 
     # ADX(14) with DI
@@ -54,21 +54,25 @@ def strategy(df: pd.DataFrame) -> pd.Series:
 
     di_spread = plus_di - minus_di
     di_strong_bullish = di_spread > 12
-    di_rising = di_spread > di_spread.shift(5)  # DI momentum
     strong_trend = adx > 20
+
+    # RSI(14) overbought filter
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    not_overbought = rsi < 70
 
     signals = pd.Series(0, index=df.index)
 
-    # Primary: DI spread + uptrend + ADX
-    signals[trend_up & strong_trend & di_strong_bullish] = 1
-
-    # DI momentum: spread is positive and rising fast in uptrend
-    signals[trend_up & strong_trend & (di_spread > 5) & di_rising] = 1
+    # Primary: DI spread + uptrend + ADX confirmation + not overbought
+    signals[trend_up & strong_trend & di_strong_bullish & not_overbought] = 1
 
     # BB oversold bounce in uptrend
     signals[trend_up & (close < bb_lower)] = 1
 
-    # Go flat during extreme volatility
+    # Go flat during extreme volatility or overbought
     signals[extreme_vol] = 0
 
     return signals
