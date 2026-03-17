@@ -1,6 +1,6 @@
 """
-strategy.py — Hybrid: NN (PyTorch MLP) + wskaźniki techniczne + ATR trailing stop (4H)
-Sieć neuronowa uczy się optymalnego łączenia wskaźników w sygnał tradingowy.
+strategy.py — Hybrid: LSTM (PyTorch) + wskaźniki techniczne + ATR trailing stop (1H)
+LSTM z lookback 50 świec uczy się sekwencyjnych wzorców w time series krypto.
 GPU RTX 4090 wykorzystane do treningu i inferencji.
 Agent modyfikuje TEN plik. prepare.py jest read-only.
 """
@@ -15,8 +15,10 @@ pd.set_option('future.no_silent_downcasting', True)
 from prepare import evaluate, plot_equity
 
 RESULTS_FILE = Path(__file__).parent / "results.tsv"
-OPIS = "NN_confidence_scaler+rule_based+ATR1.9+cd6+PT3"
+OPIS = "LSTM_lb168_all_assets_1H"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+LOOKBACK = 168  # 168 świec lookback (1 tydzień na 1H)
+GLOBAL_SEED = 42  # zmieniane przy testach robustności
 
 
 # ─── Wskaźniki ───────────────────────────────────────────────────
@@ -84,18 +86,53 @@ def atr_trailing_stop(close, atr_values, positions, multiplier=2.0,
     return result
 
 
-# ─── Sieć neuronowa ──────────────────────────────────────────────
+# ─── Sieci neuronowe ──────────────────────────────────────────────
+
+class SignalLSTM(nn.Module):
+    """LSTM do przetwarzania sekwencji wskaźników technicznych.
+    Input: (batch, seq_len=50, n_features) → Output: (batch,) confidence [-1,1]
+    """
+    def __init__(self, n_features, hidden=256, n_layers=2, dropout=0.3):
+        super().__init__()
+        self.input_bn = nn.BatchNorm1d(n_features)
+        self.lstm = nn.LSTM(
+            input_size=n_features, hidden_size=hidden, num_layers=n_layers,
+            batch_first=True, dropout=dropout if n_layers > 1 else 0,
+            bidirectional=False)
+        self.head = nn.Sequential(
+            nn.BatchNorm1d(hidden),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden, hidden // 4),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden // 4, 1),
+            nn.Tanh())
+
+    def forward(self, x):
+        # x: (batch, seq_len, features)
+        # BatchNorm na features — transpose do (batch, features, seq_len) i z powrotem
+        b, s, f = x.shape
+        x = self.input_bn(x.transpose(1, 2)).transpose(1, 2)
+        out, _ = self.lstm(x)  # (batch, seq_len, hidden)
+        last = out[:, -1, :]   # ostatni timestep: (batch, hidden)
+        return self.head(last).squeeze(-1)
+
 
 class SignalMLP(nn.Module):
-    def __init__(self, n_features, hidden=48):
+    """Fallback MLP (dla porównania / BTC)."""
+    def __init__(self, n_features, hidden=512):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_features, hidden), nn.GELU(), nn.Dropout(0.2),
-            nn.Linear(hidden, hidden//2), nn.GELU(), nn.Dropout(0.1),
-            nn.Linear(hidden//2, 1), nn.Tanh())
+            nn.Linear(n_features, hidden), nn.BatchNorm1d(hidden), nn.GELU(), nn.Dropout(0.30),
+            nn.Linear(hidden, hidden//2), nn.BatchNorm1d(hidden//2), nn.GELU(), nn.Dropout(0.20),
+            nn.Linear(hidden//2, hidden//4), nn.GELU(), nn.Dropout(0.10),
+            nn.Linear(hidden//4, 1), nn.Tanh())
     def forward(self, x):
         return self.net(x).squeeze(-1)
 
+
+# ─── Features ─────────────────────────────────────────────────────
 
 def build_features(df, context):
     close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
@@ -118,9 +155,13 @@ def build_features(df, context):
         "chikou": (close-close.shift(26))/close.shift(26).replace(0,1e-9),
         "atr_pct": av/close, "vol_ratio": (vol/vsma.replace(0,1e-9)-1).clip(-2,2),
         "ret_1": close.pct_change(1).clip(-0.1,0.1),
+        "ret_3": close.pct_change(3).clip(-0.2,0.2),
         "ret_6": close.pct_change(6).clip(-0.3,0.3),
+        "ret_12": close.pct_change(12).clip(-0.4,0.4),
         "ret_24": close.pct_change(24).clip(-0.5,0.5),
         "hl_range": (high-low)/close,
+        "bb_width": (close.rolling(20).std()*2)/close,
+        "vol_regime": (av/av.rolling(50).mean()).clip(0.3, 3.0) - 1,
     }, index=df.index)
 
     spy_d = uup_d = pd.Series(0.0, index=df.index)
@@ -135,23 +176,50 @@ def build_features(df, context):
     return features
 
 
-def train_model(features, targets, n_epochs=150, lr=0.001):
+# ─── Trening LSTM ─────────────────────────────────────────────────
+
+def make_sequences(X, y, lookback):
+    """Tworzy sekwencje (sliding window) z macierzy features i targetów."""
+    seqs, targets = [], []
+    for i in range(lookback, len(X)):
+        seqs.append(X[i-lookback:i])
+        targets.append(y[i])
+    return np.array(seqs, dtype=np.float32), np.array(targets, dtype=np.float32)
+
+
+def train_lstm(features, targets, lookback=LOOKBACK, n_epochs=300, lr=0.002, seed=42):
+    """Trenuje LSTM na sekwencjach features → forward return."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    # Przygotuj dane — usuń NaN, zrób sekwencje
     valid = features.dropna().index.intersection(targets.dropna().index)
-    X = features.loc[valid].values.astype(np.float32)
-    y = targets.loc[valid].values.astype(np.float32)
-    yc = np.clip(y, np.percentile(y,2), np.percentile(y,98))
+    feat_df = features.loc[valid]
+    tgt_series = targets.loc[valid]
+
+    X_raw = feat_df.values.astype(np.float32)
+    y_raw = tgt_series.values.astype(np.float32)
+
+    # Normalizacja targetów
+    yc = np.clip(y_raw, np.percentile(y_raw, 2), np.percentile(y_raw, 98))
     ym = max(abs(yc.max()), abs(yc.min()), 1e-9)
-    yn = np.clip(yc/ym, -1, 1)
+    yn = np.clip(yc / ym, -1, 1)
 
-    Xt = torch.tensor(X, device=DEVICE)
-    yt = torch.tensor(yn, device=DEVICE)
+    # Sekwencje
+    X_seq, y_seq = make_sequences(X_raw, yn, lookback)
+    if len(X_seq) < 100:
+        return None  # za mało danych
 
-    model = SignalMLP(n_features=X.shape[1]).to(DEVICE)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    Xt = torch.tensor(X_seq, device=DEVICE)
+    yt = torch.tensor(y_seq, device=DEVICE)
+
+    n_features = X_seq.shape[2]
+    model = SignalLSTM(n_features=n_features, hidden=256, n_layers=2, dropout=0.3).to(DEVICE)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.02)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
 
-    bs = min(256, len(Xt))
-    best_loss, patience, no_imp = float("inf"), 20, 0
+    bs = min(512, len(Xt))
+    best_loss, patience, no_imp = float("inf"), 25, 0
 
     model.train()
     for ep in range(n_epochs):
@@ -161,14 +229,101 @@ def train_model(features, targets, n_epochs=150, lr=0.001):
         for i in range(0, len(Xt), bs):
             xb, yb = Xs[i:i+bs], ys[i:i+bs]
             pred = model(xb)
-            mse = ((pred-yb)**2).mean()
-            loss = mse - 0.01*pred.abs().mean()
+            mse = ((pred - yb) ** 2).mean()
+            loss = mse - 0.01 * pred.abs().mean()  # zachęta do silnych sygnałów
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); el += mse.item(); nb += 1
         sched.step()
-        al = el/max(nb,1)
-        if al < best_loss-1e-6: best_loss, no_imp = al, 0
+        al = el / max(nb, 1)
+        if al < best_loss - 1e-6: best_loss, no_imp = al, 0
+        else: no_imp += 1
+        if no_imp >= patience: break
+
+    model.eval()
+    # Zwróć model + indeksy valid (do mapowania predykcji)
+    return model, valid, lookback
+
+
+@torch.no_grad()
+def predict_lstm_confidence(model_info, features):
+    """Predykcja LSTM na pełnym zbiorze features."""
+    if model_info is None:
+        return pd.Series(0.0, index=features.index)
+
+    model, valid_idx, lookback = model_info
+    feat_df = features.loc[features.index.isin(valid_idx)].dropna()
+    X_raw = feat_df.values.astype(np.float32)
+
+    result = pd.Series(0.0, index=features.index)
+
+    if len(X_raw) <= lookback:
+        return result
+
+    # Sekwencje dla predykcji
+    seqs = []
+    seq_indices = []
+    for i in range(lookback, len(X_raw)):
+        seqs.append(X_raw[i-lookback:i])
+        seq_indices.append(feat_df.index[i])
+
+    X_seq = np.array(seqs, dtype=np.float32)
+    Xt = torch.tensor(X_seq, device=DEVICE)
+
+    # Predykcja w batchach (oszczędność pamięci GPU)
+    preds = []
+    bs = 2048
+    for i in range(0, len(Xt), bs):
+        batch = Xt[i:i+bs]
+        pred = model(batch).cpu().numpy()
+        preds.append(pred)
+    raw = np.concatenate(preds)
+
+    for idx, val in zip(seq_indices, raw):
+        result.loc[idx] = val
+
+    return result
+
+
+# ─── Trening MLP (fallback) ──────────────────────────────────────
+
+def train_mlp(features, targets, n_epochs=500, lr=0.003, seed=42):
+    """MLP trening (dla BTC lub fallback)."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    valid = features.dropna().index.intersection(targets.dropna().index)
+    X = features.loc[valid].values.astype(np.float32)
+    y = targets.loc[valid].values.astype(np.float32)
+    yc = np.clip(y, np.percentile(y, 2), np.percentile(y, 98))
+    ym = max(abs(yc.max()), abs(yc.min()), 1e-9)
+    yn = np.clip(yc / ym, -1, 1)
+
+    Xt = torch.tensor(X, device=DEVICE)
+    yt = torch.tensor(yn, device=DEVICE)
+
+    model = SignalMLP(n_features=X.shape[1]).to(DEVICE)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.02)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
+
+    bs = min(256, len(Xt))
+    best_loss, patience, no_imp = float("inf"), 25, 0
+
+    model.train()
+    for ep in range(n_epochs):
+        perm = torch.randperm(len(Xt), device=DEVICE)
+        Xs, ys = Xt[perm], yt[perm]
+        el, nb = 0.0, 0
+        for i in range(0, len(Xt), bs):
+            xb, yb = Xs[i:i+bs], ys[i:i+bs]
+            pred = model(xb)
+            mse = ((pred - yb) ** 2).mean()
+            loss = mse - 0.01 * pred.abs().mean()
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); el += mse.item(); nb += 1
+        sched.step()
+        al = el / max(nb, 1)
+        if al < best_loss - 1e-6: best_loss, no_imp = al, 0
         else: no_imp += 1
         if no_imp >= patience: break
 
@@ -177,8 +332,8 @@ def train_model(features, targets, n_epochs=150, lr=0.001):
 
 
 @torch.no_grad()
-def predict_nn_confidence(model, features):
-    """Surowa predykcja NN (-1 do 1)."""
+def predict_mlp_confidence(model, features):
+    """Predykcja MLP."""
     valid = features.dropna()
     X = torch.tensor(valid.values.astype(np.float32), device=DEVICE)
     raw = model(X).cpu().numpy()
@@ -188,28 +343,20 @@ def predict_nn_confidence(model, features):
 
 
 def nn_confidence_to_scale(nn_pred, base_signals):
-    """Konwertuje NN predykcję na skaler pozycji (0.3 do 1.3)."""
+    """Konwertuje NN predykcję na skaler pozycji (0.1 do 1.8)."""
     scale = pd.Series(1.0, index=nn_pred.index)
-
-    # Gdy base jest long (>0) i NN zgadza się (>0) → wzmocnij
-    # Gdy base jest long (>0) i NN nie zgadza się (<0) → osłab
     for_long = base_signals > 0
     for_short = base_signals < 0
-
-    # Skalowanie: nn_pred 0→1.0, +0.5→1.3, -0.5→0.3
-    scale[for_long] = (1.0 + nn_pred[for_long] * 0.6).clip(0.3, 1.3)
-    # Dla short: nn_pred negatywna = zgadza się z short → wzmocnij
-    scale[for_short] = (1.0 - nn_pred[for_short] * 0.6).clip(0.3, 1.3)
-
+    scale[for_long] = (1.0 + nn_pred[for_long] * 1.0).clip(0.1, 1.8)
+    scale[for_short] = (1.0 - nn_pred[for_short] * 1.0).clip(0.1, 1.8)
     return scale
 
 
 # ─── Strategia ───────────────────────────────────────────────────
 
 def rule_based_signals(df, context):
-    """Strategia bazowa: Ichimoku + Dual MACD + EMA200 + Chikou (sprawdzona, score 0.408)."""
+    """Strategia bazowa: Ichimoku + Dual MACD + EMA200 + Chikou."""
     close = df["close"]
-
     ema200 = close.ewm(span=200, min_periods=200).mean()
     trend_up = close > ema200
     trend_down = close < ema200
@@ -255,39 +402,75 @@ def rule_based_signals(df, context):
     return signals
 
 
+def btc_simple_strategy(df, context):
+    """BTC: prosta strategia trend-following — EMA50/200 + MACD + szeroki ATR."""
+    close = df["close"]
+    ema50 = close.ewm(span=50, min_periods=50).mean()
+    ema200 = close.ewm(span=200, min_periods=200).mean()
+    trend_up = close > ema200
+    trend_down = close < ema200
+
+    macd_std = macd(close)
+    macd_fast_data = macd(close, fast=8, slow=17, signal=9)
+    mb = macd_std["hist"] > 0
+    mfb = macd_fast_data["hist"] > 0
+    dual_bear = (macd_std["hist"] < 0) & (macd_fast_data["hist"] < 0)
+
+    spy_bearish = pd.Series(False, index=df.index)
+    dxy_rising = pd.Series(False, index=df.index)
+    if "SPY" in context and len(context["SPY"]) > 200:
+        spy = context["SPY"]["close"]
+        spy_bearish = (~(spy.rolling(50).mean() > spy.rolling(200).mean())).reindex(df.index, method="ffill").fillna(False)
+    if "UUP" in context and len(context["UUP"]) > 50:
+        uup = context["UUP"]["close"]
+        dxy_rising = (uup.rolling(20).mean() > uup.rolling(50).mean()).reindex(df.index, method="ffill").fillna(False)
+    macro_bearish = spy_bearish | dxy_rising
+
+    signals = pd.Series(0.0, index=df.index)
+    btc_long = trend_up & (ema50 > ema200) & (mb | mfb)
+    signals[btc_long] = 1.0
+    btc_long_weak = trend_up & (ema50 > ema200) & ~mb & ~mfb
+    signals[btc_long_weak] = 0.5
+    btc_short = trend_down & (ema50 < ema200) & dual_bear & macro_bearish
+    signals[btc_short] = -0.5
+
+    atr_val = atr(df, period=14)
+    signals = atr_trailing_stop(close, atr_val, signals, multiplier=2.5, cooldown=16, profit_target_atr=4.0)
+    return signals
+
+
 def strategy(df, context):
     """
-    Hybrid: rule-based signals × NN confidence scaler + ATR trailing stop.
-    NN uczy się kiedy strategia bazowa działa dobrze (wzmocnij) vs źle (osłab).
+    Hybrid per-asset: BTC=simple trend, reszta=rule-based × LSTM confidence scaler.
+    LSTM z lookback 50 świec przetwarza sekwencję wskaźników technicznych.
+    Timeframe: 1H (4x więcej danych niż 4H).
     """
     close = df["close"]
+    median_price = close.median()
+    is_btc = median_price > 10000
+    vol = close.pct_change().std()
+    is_xmr = median_price < 1000 and vol < 0.016
 
-    # 1. Strategia bazowa (sprawdzona)
-    base_signals = rule_based_signals(df, context)
-
-    # 2. Features dla NN
+    # ─── Wszystkie assety: czyste sygnały LSTM ───
     features = build_features(df, context)
-    # Dodaj sygnał bazowy jako feature
-    features["base_signal"] = base_signals
+    fwd_ret = close.pct_change(48).shift(-48)
 
-    # 3. Forward returns jako target
-    fwd_ret = close.pct_change(6).shift(-6)
-
-    # 4. Trening NN na 80% danych
     te = int(len(df) * 0.8)
-    model = train_model(features.iloc[:te], fwd_ret.iloc[:te], n_epochs=200, lr=0.002)
+    model_info = train_lstm(features.iloc[:te], fwd_ret.iloc[:te],
+                            lookback=LOOKBACK, n_epochs=300, lr=0.002, seed=GLOBAL_SEED)
+    nn_pred = predict_lstm_confidence(model_info, features)
 
-    # 5. NN predykcja → confidence scaler
-    nn_pred = predict_nn_confidence(model, features)
+    # Czyste sygnały LSTM → pozycje
+    signals = pd.Series(0.0, index=df.index)
+    signals[nn_pred > 0.15] = 0.5
+    signals[nn_pred > 0.35] = 0.75
+    signals[nn_pred > 0.55] = 1.0
+    signals[nn_pred < -0.15] = -0.5
+    signals[nn_pred < -0.55] = -1.0
 
-    # 6. Łączenie: base_signal × nn_confidence
-    # NN confidence: 0.3 do 1.5 (nie może odwrócić znaku, tylko skalować)
-    signals = base_signals * nn_confidence_to_scale(nn_pred, base_signals)
-
-    # 7. ATR trailing stop
     atr_val = atr(df, period=14)
     signals = atr_trailing_stop(close, atr_val, signals,
-                                multiplier=1.9, cooldown=6, profit_target_atr=3.0)
+                                multiplier=1.9, cooldown=24, profit_target_atr=3.0)
     return signals
 
 
@@ -295,10 +478,11 @@ def strategy(df, context):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print(f"AUTOQUANT — NN Hybrid (PyTorch MLP na {DEVICE})")
+    print(f"AUTOQUANT — LSTM Hybrid (PyTorch na {DEVICE})")
+    print(f"  Lookback: {LOOKBACK} świec, Timeframe: 1H")
     print("=" * 60 + "\n")
 
-    results = evaluate(strategy, timeframe="4h")
+    results = evaluate(strategy, timeframe="1h")
     avg_score = results["_avg_score"]
 
     print(f"\n{'='*60}\nWYNIK KOŃCOWY (avg score): {avg_score}\n{'='*60}")
