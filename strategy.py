@@ -33,8 +33,7 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     vol_median = vol20.rolling(252).median()  # 1-year median vol
     extreme_vol = vol20 > (vol_median * 2.0)
 
-    # ADX(20) with DI - smoother period
-    adx_period = 20
+    # ADX(14) with DI
     plus_dm = high.diff()
     minus_dm = -low.diff()
     plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
@@ -46,11 +45,11 @@ def strategy(df: pd.DataFrame) -> pd.Series:
         (low - close.shift(1)).abs()
     ], axis=1).max(axis=1)
 
-    atr = tr.rolling(adx_period).mean()
-    plus_di = 100 * (plus_dm.rolling(adx_period).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(adx_period).mean() / atr)
+    atr14 = tr.rolling(14).mean()
+    plus_di = 100 * (plus_dm.rolling(14).mean() / atr14)
+    minus_di = 100 * (minus_dm.rolling(14).mean() / atr14)
     dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
-    adx = dx.rolling(adx_period).mean()
+    adx = dx.rolling(14).mean()
 
     di_spread = plus_di - minus_di
     di_strong_bullish = di_spread > 12
@@ -60,9 +59,6 @@ def strategy(df: pd.DataFrame) -> pd.Series:
 
     # Primary: DI spread + uptrend + ADX confirmation
     signals[trend_up & strong_trend & di_strong_bullish] = 1
-
-    # BB oversold bounce in uptrend
-    signals[trend_up & (close < bb_lower)] = 1
 
     # Go flat during extreme volatility
     signals[extreme_vol] = 0
