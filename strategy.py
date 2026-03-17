@@ -52,7 +52,7 @@ def strategy(df: pd.DataFrame) -> pd.Series:
     adx = dx.rolling(14).mean()
 
     di_spread = plus_di - minus_di
-    di_strong_bullish = di_spread > 12
+    di_strong_bullish = di_spread > 11
     strong_trend = adx > 20
 
     signals = pd.Series(0, index=df.index)
@@ -62,10 +62,6 @@ def strategy(df: pd.DataFrame) -> pd.Series:
 
     # BB oversold bounce in uptrend
     signals[trend_up & (close < bb_lower)] = 1
-
-    # SMA50 pullback: price near SMA50 support in strong trend
-    near_sma50 = (close / sma50 - 1).abs() < 0.02
-    signals[near_sma50 & strong_trend & (di_spread > 5)] = 1
 
     # Go flat during extreme volatility
     signals[extreme_vol] = 0
