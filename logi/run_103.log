@@ -1,0 +1,71 @@
+============================================================
+AUTOQUANT — LSTM Hybrid (PyTorch na cuda)
+  Lookback: 168 świec, Timeframe: 1H
+============================================================
+
+Ładowanie danych (1h)...
+  BTC/USDT: wczytano z cache (/home/juser/.cache/autoquant/data/BTC_USDT_binance_1h.parquet)
+  ETH/USDT: wczytano z cache (/home/juser/.cache/autoquant/data/ETH_USDT_binance_1h.parquet)
+  XMR/USDT: wczytano z cache (/home/juser/.cache/autoquant/data/XMR_USDT_bitfinex_1h.parquet)
+  SOL/USDT: wczytano z cache (/home/juser/.cache/autoquant/data/SOL_USDT_binance_1h.parquet)
+  TAO/USDT: wczytano z cache (/home/juser/.cache/autoquant/data/TAO_USDT_binance_1h.parquet)
+  SPY: wczytano z cache (/home/juser/.cache/autoquant/data/SPY_1h.parquet)
+  QQQ: wczytano z cache (/home/juser/.cache/autoquant/data/QQQ_1h.parquet)
+  UUP: wczytano z cache (/home/juser/.cache/autoquant/data/UUP_1h.parquet)
+  GLD: wczytano z cache (/home/juser/.cache/autoquant/data/GLD_1h.parquet)
+  VIXY: wczytano z cache (/home/juser/.cache/autoquant/data/VIXY_1h.parquet)
+  FED_RATE: wczytano z cache (/home/juser/.cache/autoquant/data/macro_FED_RATE.parquet)
+  CPI: wczytano z cache (/home/juser/.cache/autoquant/data/macro_CPI.parquet)
+  TREASURY_10Y: wczytano z cache (/home/juser/.cache/autoquant/data/macro_TREASURY_10Y.parquet)
+  TREASURY_2Y: wczytano z cache (/home/juser/.cache/autoquant/data/macro_TREASURY_2Y.parquet)
+  BTC/USDT FR: wczytano z cache
+  ETH/USDT FR: wczytano z cache
+  SOL/USDT FR: wczytano z cache
+  Sentyment: pobieram z Alpha Vantage...
+    Pobieram sentyment dla COIN:BTC...
+    Pobieram sentyment dla COIN:ETH...
+  ⚠ Sentyment: brak danych
+
+Załadowano: 5 krypto, 5 ETF, 4 makro, 3 futures (FR+OI), 0 sentyment
+
+  BTC/USDT:
+    Train — Sharpe:   3.786  Return:  293.91%  MaxDD: -11.78%  Trades: 1704  Long/Short/Flat: 17%/14%/70%
+    Val   — Sharpe:   2.308  Return:   44.17%  MaxDD:  -7.96%  Trades: 945  Long/Short/Flat: 17%/15%/68%
+    B&H:  Train  237.14%  Val  -10.80%
+    Score: 1.244
+
+  ETH/USDT:
+    Train — Sharpe:   4.623  Return:  749.38%  MaxDD: -11.95%  Trades: 1932  Long/Short/Flat: 16%/15%/69%
+    Val   — Sharpe:   4.200  Return:  188.67%  MaxDD: -11.93%  Trades: 779  Long/Short/Flat: 17%/14%/70%
+    B&H:  Train   15.69%  Val   22.30%
+    Score: 2.6671
+
+  XMR/USDT:
+    Train — Sharpe:   3.286  Return:  374.12%  MaxDD: -11.57%  Trades: 2583  Long/Short/Flat: 16%/13%/71%
+    Val   — Sharpe:   4.821  Return:  352.44%  MaxDD: -14.06%  Trades: 994  Long/Short/Flat: 16%/12%/72%
+    B&H:  Train   42.35%  Val   75.97%
+    Score: 2.46
+
+  SOL/USDT:
+    Train — Sharpe:   3.021  Return:  616.78%  MaxDD: -18.07%  Trades: 1243  Long/Short/Flat: 16%/14%/70%
+    Val   — Sharpe:   3.687  Return:  198.30%  MaxDD: -12.34%  Trades: 960  Long/Short/Flat: 16%/15%/68%
+    B&H:  Train  557.47%  Val  -26.52%
+    Score: 2.2783
+
+  TAO/USDT:
+    Train — Sharpe:   3.129  Return:  256.20%  MaxDD: -16.96%  Trades: 663  Long/Short/Flat: 14%/18%/68%
+    Val   — Sharpe:   2.911  Return:  189.79%  MaxDD: -15.99%  Trades: 709  Long/Short/Flat: 15%/15%/70%
+    B&H:  Train  -63.09%  Val   11.89%
+    Score: 1.9303
+
+score:        2.1159
+assets:       5
+
+============================================================
+WYNIK KOŃCOWY (avg score): 2.1159
+============================================================
+
+Wykres zapisano → equity.png
+
+📊 Zapisano wynik #103 → /home/juser/ej-aj/karpathy/autoquant/results.tsv
+  🏆 Zapisano 0 modeli → /home/juser/.cache/autoquant/best_model

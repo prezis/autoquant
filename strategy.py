@@ -15,16 +15,10 @@ pd.set_option('future.no_silent_downcasting', True)
 from prepare import evaluate, plot_equity
 
 RESULTS_FILE = Path(__file__).parent / "results.tsv"
-OPIS = "LSTM_lb168_per_asset_ensemble_1H"
+OPIS = "LSTM_h384_3L_drop03_target24h_discrete_funding_1H"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-LOOKBACK = 168  # 168 świec lookback (1 tydzień na 1H)
-GLOBAL_SEED = 42  # zmieniane przy testach robustności
-
-# Per-asset ensemble: liczba modeli na asset (więcej = stabilniej, ale wolniej)
-# Bazowane na teście robustności 17.03: XMR std=0.98 (niestabilny), reszta std<0.28
-ENSEMBLE_SEEDS_STABLE = [42, 271]           # 2 modele dla stabilnych (BTC, TAO)
-ENSEMBLE_SEEDS_MODERATE = [42, 271, 404]    # 3 modele dla umiarkowanych (ETH, SOL)
-ENSEMBLE_SEEDS_UNSTABLE = [42, 271, 404, 999, 137]  # 5 modeli dla XMR
+LOOKBACK = 168  # 168 świec lookback (7 dni na 1H)
+SINGLE_SEED = 42  # jednolity seed dla wszystkich assetów (bez per-asset ensemble)
 
 MODEL_RETRAIN_HOURS = 168  # retrenuj model jeśli starszy niż 7 dni
 BEST_MODEL_DIR = Path.home() / ".cache" / "autoquant" / "best_model"
@@ -131,6 +125,58 @@ class SignalLSTM(nn.Module):
         return self.head(last).squeeze(-1)
 
 
+class PositionalEncoding(nn.Module):
+    """Sinusoidalne kodowanie pozycji — pozwala Transformerowi rozumieć kolejność."""
+    def __init__(self, d_model, max_len=500):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div[:d_model // 2])  # handle odd d_model
+        self.register_buffer("pe", pe.unsqueeze(0))  # (1, max_len, d_model)
+
+    def forward(self, x):
+        return x + self.pe[:, :x.size(1), :]
+
+
+class SignalTransformer(nn.Module):
+    """Transformer encoder do time series krypto.
+    Input: (batch, seq_len=168, n_features) → Output: (batch,) confidence [-1,1]
+    Self-attention pozwala modelowi patrzeć na WSZYSTKIE timestepy naraz
+    i sam decydować które momenty w historii są najważniejsze.
+    """
+    def __init__(self, n_features, d_model=128, n_heads=4, n_layers=4, dropout=0.3):
+        super().__init__()
+        self.input_bn = nn.BatchNorm1d(n_features)
+        self.input_proj = nn.Linear(n_features, d_model)
+        self.pos_enc = PositionalEncoding(d_model, max_len=500)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 4,
+            dropout=dropout, activation="gelu", batch_first=True, norm_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.head = nn.Sequential(
+            nn.BatchNorm1d(d_model),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(d_model, d_model // 4),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(d_model // 4, 1),
+            nn.Tanh())
+
+    def forward(self, x):
+        # x: (batch, seq_len, features)
+        b, s, f = x.shape
+        x = self.input_bn(x.transpose(1, 2)).transpose(1, 2)
+        x = self.input_proj(x)  # (batch, seq_len, d_model)
+        x = self.pos_enc(x)
+        x = self.encoder(x)    # (batch, seq_len, d_model)
+        # Mean pooling po sekwencji (stabilniejsze niż [CLS] token)
+        x = x.mean(dim=1)      # (batch, d_model)
+        return self.head(x).squeeze(-1)
+
+
 class SignalMLP(nn.Module):
     """Fallback MLP (dla porównania / BTC)."""
     def __init__(self, n_features, hidden=512):
@@ -185,6 +231,36 @@ def build_features(df, context):
         uup_d = ((u-um)/um).reindex(df.index, method="ffill").fillna(0)
     features["spy_trend"] = spy_d.clip(-0.1,0.1)
     features["uup_trend"] = uup_d.clip(-0.05,0.05)
+
+    # Funding rate rynku krypto (Binance Futures, co 8H → forward-fill na 1H)
+    # Wysoki funding (>0.01%) = rynek przegrzany, longs przepłacają → ryzyko reversal
+    def _strip_tz(series):
+        """Usuwa timezone z indeksu Series (funding rate ma UTC, OHLCV nie ma TZ)."""
+        if series.index.tz is not None:
+            series = series.copy()
+            series.index = series.index.tz_localize(None)
+        return series
+
+    fr_btc = fr_eth = fr_sol = pd.Series(0.0, index=df.index)
+    if "FR_BTC_" in context and len(context["FR_BTC_"]) > 10:
+        fr_btc = _strip_tz(context["FR_BTC_"]["close"]).reindex(df.index, method="ffill").fillna(0)
+    if "FR_ETH_" in context and len(context["FR_ETH_"]) > 10:
+        fr_eth = _strip_tz(context["FR_ETH_"]["close"]).reindex(df.index, method="ffill").fillna(0)
+    if "FR_SOL_" in context and len(context["FR_SOL_"]) > 10:
+        fr_sol = _strip_tz(context["FR_SOL_"]["close"]).reindex(df.index, method="ffill").fillna(0)
+    fr_count = (fr_btc != 0).astype(int) + (fr_eth != 0).astype(int) + (fr_sol != 0).astype(int)
+    market_fr = (fr_btc + fr_eth + fr_sol) / fr_count.replace(0, 1)
+    features["market_funding"] = market_fr.clip(-0.005, 0.005)
+
+    # VIXY (ETF proxy VIX) — rośnie przy risk-off, spada przy risk-on
+    vixy_d = pd.Series(0.0, index=df.index)
+    if "VIXY" in context and len(context["VIXY"]) > 20:
+        vixy = context["VIXY"]["close"]
+        vixy_ma = vixy.rolling(20).mean()
+        vixy_d = ((vixy - vixy_ma) / vixy_ma.replace(0, 1e-9)).reindex(
+            df.index, method="ffill").fillna(0)
+    features["vixy_trend"] = vixy_d.clip(-0.5, 0.5)
+
     return features
 
 
@@ -226,7 +302,7 @@ def train_lstm(features, targets, lookback=LOOKBACK, n_epochs=300, lr=0.002, see
     yt = torch.tensor(y_seq, device=DEVICE)
 
     n_features = X_seq.shape[2]
-    model = SignalLSTM(n_features=n_features, hidden=256, n_layers=2, dropout=0.3).to(DEVICE)
+    model = SignalLSTM(n_features=n_features, hidden=384, n_layers=3, dropout=0.3).to(DEVICE)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.02)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
 
@@ -297,6 +373,97 @@ def predict_lstm_confidence(model_info, features):
     return result
 
 
+def predict_live(model_info, features):
+    """Predykcja LSTM na PEŁNYM zakresie features (bez filtru valid_idx).
+    Używana przez live_signals.py — przewiduje dla każdej świecy łącznie z najnowszymi."""
+    if model_info is None:
+        return pd.Series(0.0, index=features.index)
+
+    model, _, lookback = model_info
+    feat_df = features.dropna()
+    X_raw = feat_df.values.astype(np.float32)
+
+    result = pd.Series(0.0, index=features.index)
+    if len(X_raw) <= lookback:
+        return result
+
+    seqs, seq_indices = [], []
+    for i in range(lookback, len(X_raw)):
+        seqs.append(X_raw[i - lookback:i])
+        seq_indices.append(feat_df.index[i])
+
+    X_seq = np.array(seqs, dtype=np.float32)
+    Xt = torch.tensor(X_seq, device=DEVICE)
+
+    preds = []
+    model.eval()
+    with torch.no_grad():
+        for i in range(0, len(Xt), 2048):
+            preds.append(model(Xt[i:i + 2048]).cpu().numpy())
+    raw = np.concatenate(preds)
+
+    for idx, val in zip(seq_indices, raw):
+        result.loc[idx] = val
+    return result
+
+
+# ─── Trening Transformer ──────────────────────────────────────────
+
+def train_transformer(features, targets, lookback=LOOKBACK, n_epochs=300, lr=0.001, seed=42):
+    """Trenuje Transformer na sekwencjach features → forward return."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    valid = features.dropna().index.intersection(targets.dropna().index)
+    feat_df = features.loc[valid]
+    tgt_series = targets.loc[valid]
+
+    X_raw = feat_df.values.astype(np.float32)
+    y_raw = tgt_series.values.astype(np.float32)
+
+    yc = np.clip(y_raw, np.percentile(y_raw, 2), np.percentile(y_raw, 98))
+    ym = max(abs(yc.max()), abs(yc.min()), 1e-9)
+    yn = np.clip(yc / ym, -1, 1)
+
+    X_seq, y_seq = make_sequences(X_raw, yn, lookback)
+    if len(X_seq) < 100:
+        return None
+
+    Xt = torch.tensor(X_seq, device=DEVICE)
+    yt = torch.tensor(y_seq, device=DEVICE)
+
+    n_features = X_seq.shape[2]
+    model = SignalTransformer(n_features=n_features, d_model=128, n_heads=4,
+                              n_layers=4, dropout=0.3).to(DEVICE)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.02)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
+
+    bs = min(256, len(Xt))  # mniejszy batch — Transformer je więcej pamięci
+    best_loss, patience, no_imp = float("inf"), 25, 0
+
+    model.train()
+    for ep in range(n_epochs):
+        perm = torch.randperm(len(Xt), device=DEVICE)
+        Xs, ys = Xt[perm], yt[perm]
+        el, nb = 0.0, 0
+        for i in range(0, len(Xt), bs):
+            xb, yb = Xs[i:i+bs], ys[i:i+bs]
+            pred = model(xb)
+            mse = ((pred - yb) ** 2).mean()
+            loss = mse - 0.01 * pred.abs().mean()
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step(); el += mse.item(); nb += 1
+        sched.step()
+        al = el / max(nb, 1)
+        if al < best_loss - 1e-6: best_loss, no_imp = al, 0
+        else: no_imp += 1
+        if no_imp >= patience: break
+
+    model.eval()
+    return model, valid, lookback
+
+
 # ─── Trening MLP (fallback) ──────────────────────────────────────
 
 def train_mlp(features, targets, n_epochs=500, lr=0.003, seed=42):
@@ -351,6 +518,34 @@ def predict_mlp_confidence(model, features):
     raw = model(X).cpu().numpy()
     result = pd.Series(0.0, index=features.index)
     result.loc[valid.index] = raw
+    return result
+
+
+@torch.no_grad()
+def predict_on_data(model_info, features_all):
+    """Predykcja na PEŁNYM zakresie features (nie tylko train_valid_idx).
+    Walkforward: model trenowany na [0:t] może predykować na [t:].
+    """
+    if model_info is None:
+        return pd.Series(0.0, index=features_all.index)
+    model, valid_idx, lookback = model_info
+    feat_df = features_all.dropna()
+    X_raw = feat_df.values.astype(np.float32)
+    result = pd.Series(0.0, index=features_all.index)
+    if len(X_raw) <= lookback:
+        return result
+    seqs, seq_indices = [], []
+    for i in range(lookback, len(X_raw)):
+        seqs.append(X_raw[i-lookback:i])
+        seq_indices.append(feat_df.index[i])
+    X_seq = np.array(seqs, dtype=np.float32)
+    Xt = torch.tensor(X_seq, device=DEVICE)
+    preds = []
+    for i in range(0, len(Xt), 2048):
+        preds.append(model(Xt[i:i+2048]).cpu().numpy())
+    raw = np.concatenate(preds)
+    for idx, val in zip(seq_indices, raw):
+        result.loc[idx] = val
     return result
 
 
@@ -524,62 +719,53 @@ def save_best_models(model_dir: Path = BEST_MODEL_DIR):
 
 def strategy(df, context, model_cache_dir=None, model_retrain_hours=MODEL_RETRAIN_HOURS):
     """
-    Hybrid per-asset: BTC=simple trend, reszta=rule-based × LSTM confidence scaler.
-    LSTM z lookback 50 świec przetwarza sekwencję wskaźników technicznych.
-    Timeframe: 1H (4x więcej danych niż 4H).
+    LSTM 3L h=384 + BatchNorm + dropout=0.3, target=24h forward return.
+    Jeśli model_cache_dir podany i model jest świeży → ładuje z dysku (tryb live).
+    W przeciwnym razie trenuje od zera i zapisuje do cache (tryb backtest).
     """
     close = df["close"]
-    median_price = close.median()
-    is_btc = median_price > 10000
-    vol = close.pct_change().std()
-    is_xmr = median_price < 1000 and vol < 0.016
-
-    # ─── Per-asset ensemble: dobierz liczbę modeli do stabilności assetu ───
-    if is_xmr:
-        seeds = ENSEMBLE_SEEDS_UNSTABLE   # 5 modeli — XMR bardzo niestabilny
-    elif is_btc:
-        seeds = ENSEMBLE_SEEDS_STABLE     # 2 modele — BTC stabilny
-    elif median_price > 1000:
-        seeds = ENSEMBLE_SEEDS_MODERATE   # 3 modele — ETH
-    else:
-        # SOL i TAO
-        n_rows = len(df)
-        if n_rows < 12000:  # TAO ma mniej danych (~8000 1H)
-            seeds = ENSEMBLE_SEEDS_STABLE     # 2 modele — TAO stabilny
-        else:
-            seeds = ENSEMBLE_SEEDS_MODERATE   # 3 modele — SOL
-
     features = build_features(df, context)
-    fwd_ret = close.pct_change(48).shift(-48)
-    te = int(len(df) * 0.8)
-
-    # Opcjonalny cache modeli (używany przez live_signals.py)
-    cache_dir = Path(model_cache_dir) if model_cache_dir else None
-    if cache_dir:
-        cache_dir.mkdir(parents=True, exist_ok=True)
+    n = len(df)
     asset = _asset_id(df)
+    live_mode = False
 
-    # Trenuj N modeli z różnymi seedami, uśrednij predykcje
-    preds = []
-    session = []
-    for seed in seeds:
-        model_info = None
-        if cache_dir:
-            cache_path = cache_dir / f"lstm_{asset}_s{seed}.pt"
-            if _model_fresh(cache_path, max_hours=model_retrain_hours):
-                model_info = load_model(cache_path)
-        if model_info is None:
-            model_info = train_lstm(features.iloc[:te], fwd_ret.iloc[:te],
-                                    lookback=LOOKBACK, n_epochs=300, lr=0.002, seed=seed)
-            if cache_dir:
-                save_model(model_info, cache_path)
-        session.append((model_info, seed))
-        pred = predict_lstm_confidence(model_info, features)
-        preds.append(pred)
-    _SESSION_MODELS[asset] = session  # zachowaj dla save_best_models()
-    nn_pred = sum(preds) / len(preds)
+    # ─── Próba załadowania z cache ───
+    model_info = None
+    if model_cache_dir is not None:
+        model_path = Path(model_cache_dir) / f"lstm_{asset}_s{SINGLE_SEED}.pt"
+        if _model_fresh(model_path, max_hours=model_retrain_hours):
+            model_info = load_model(model_path)
+            if model_info is not None:
+                live_mode = True
+                print(f"  [cache] {asset}: załadowano model z dysku ({model_path.name})")
 
-    # Czyste sygnały LSTM → pozycje
+    # ─── Trening (gdy brak cache lub za stary) ───
+    if model_info is None:
+        fwd_ret = close.pct_change(24).shift(-24)
+        te = int(n * 0.80)
+        model_info = train_lstm(
+            features.iloc[:te], fwd_ret.iloc[:te],
+            lookback=LOOKBACK, n_epochs=300, lr=0.002, seed=SINGLE_SEED
+        )
+        # Zapisz do _SESSION_MODELS (potrzebne do save_best_models)
+        if asset not in _SESSION_MODELS:
+            _SESSION_MODELS[asset] = []
+        _SESSION_MODELS[asset].append((model_info, SINGLE_SEED))
+        # Zapisz od razu do cache (jeśli podano)
+        if model_cache_dir is not None and model_info is not None:
+            Path(model_cache_dir).mkdir(parents=True, exist_ok=True)
+            save_model(model_info, Path(model_cache_dir) / f"lstm_{asset}_s{SINGLE_SEED}.pt")
+
+    # ─── Predykcja ───
+    # Live mode: na pełnych danych (w tym świeże świece poza oknem treningowym)
+    # Backtest mode: tylko na train_valid_idx (unikamy lookahead)
+    if live_mode:
+        nn_pred = predict_live(model_info, features)
+    else:
+        nn_pred = predict_lstm_confidence(model_info, features)
+
+    # ─── Dyskretne progi (jak w rekordowym #93) ───
+    # Ciągłe pozycjonowanie (#95) tworzyło 3949 trades vs 785 w #93 → ogromne koszty
     signals = pd.Series(0.0, index=df.index)
     signals[nn_pred > 0.15] = 0.5
     signals[nn_pred > 0.35] = 0.75
@@ -629,8 +815,5 @@ if __name__ == "__main__":
         f.write(row + "\n")
     print(f"\n📊 Zapisano wynik #{nr} → {RESULTS_FILE}")
 
-    # Jeśli nowy rekord — zapisz modele jako najlepsze
-    with open(RESULTS_FILE) as f:
-        scores = [float(l.split("\t")[2]) for l in f.readlines()[1:] if l.strip()]
-    if scores and avg_score >= max(scores):
-        save_best_models(BEST_MODEL_DIR)
+    # Zawsze zapisz modele — live_signals.py ładuje je bez ponownego treningu
+    save_best_models(BEST_MODEL_DIR)
