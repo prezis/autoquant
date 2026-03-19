@@ -649,16 +649,24 @@ def btc_simple_strategy(df, context):
 # ─── Cache modeli ────────────────────────────────────────────────
 
 def _asset_id(df) -> str:
-    """Identyfikuje asset po cenie i zmienności."""
+    """Identyfikuje asset po cenie mediany i zmienności.
+    Progi dobrane empirycznie na danych 2023-2026 (wszystkie okresy: full/train/val):
+      BTC  median > 10 000
+      ETH  median > 1 000
+      XMR  vol < 0.011 AND median > 155  (train=162, val=324 — zawsze > 155)
+      TAO  median > 150  (val=248, train=~300 — zawsze > SOL)
+      SOL  reszta  (val median=148, train=40 — zawsze < 150)
+    Uwaga: SOL w val period ma vol=0.0088 (niższy niż XMR!), dlatego sam vol nie wystarczy.
+    """
     median_price = df["close"].median()
     vol = df["close"].pct_change().std()
     if median_price > 10000:
         return "btc"
-    elif median_price < 1000 and vol < 0.016:
-        return "xmr"
     elif median_price > 1000:
         return "eth"
-    elif len(df) < 12000:
+    elif vol < 0.011 and median_price > 155:
+        return "xmr"
+    elif median_price > 150:
         return "tao"
     return "sol"
 

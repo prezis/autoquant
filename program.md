@@ -186,3 +186,20 @@ LSTM h=384 3L:         2.116  (#103, 2026-03-19 00:18)
 - Wyniki logowane automatycznie do `results.tsv`
 - Wszystkie pliki i komentarze w języku polskim
 - evaluate() wywołuje strategy() **10 razy** (5 assetów × 2 okresy: train i val)
+- Logi z eksperymentów w folderze `logi/` (format: `logi/run_NNN.log`)
+
+## live_signals.py
+
+Generuje sygnały live bez ponownego treningu — ładuje modele z dysku.
+
+```bash
+python3 live_signals.py              # jednorazowo
+python3 live_signals.py --loop       # pętla co godzinę
+python3 live_signals.py --loop --telegram  # + powiadomienia Telegram
+```
+
+Modele cache: `~/.cache/autoquant/best_model/lstm_{asset}_s42.pt` (5 plików ~12MB każdy).
+Po każdym `python3 strategy.py` modele są automatycznie aktualizowane.
+
+**Uwaga `_asset_id()`:** SOL w val period (bessa) ma vol < XMR — identyfikacja po vol+cenie:
+`vol < 0.011 AND median > 155` → xmr | `median > 150` → tao | reszta → sol

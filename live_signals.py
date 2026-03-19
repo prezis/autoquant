@@ -65,10 +65,15 @@ BG_YELLOW = "\033[43;30m"
 # ─── Pobieranie świeżych danych ─────────────────────────────────
 
 def fetch_fresh_crypto(symbol: str, limit: int = 500) -> pd.DataFrame:
-    """Pobiera najnowsze świece 1H z giełdy (bez cache)."""
+    """Pobiera najnowsze świece 1H z giełdy (bez cache).
+    Używa parametru since aby zawsze pobierać NAJNOWSZE świece — niezbędne dla Bitfinex,
+    który bez since zwraca dane od początku historii zamiast od końca.
+    """
     exchange, exchange_id = _get_exchange(symbol)
 
-    candles = exchange.fetch_ohlcv(symbol, "1h", limit=limit)
+    # since = teraz minus (limit * 1h) → gwarantuje najnowsze świece
+    since_ms = int((time.time() - limit * 3600) * 1000)
+    candles = exchange.fetch_ohlcv(symbol, "1h", since=since_ms, limit=limit)
     if not candles:
         return pd.DataFrame()
 
@@ -77,6 +82,13 @@ def fetch_fresh_crypto(symbol: str, limit: int = 500) -> pd.DataFrame:
     df = df.set_index("timestamp")
     df = df[~df.index.duplicated(keep="first")]
     df = df.sort_index()
+
+    # Ostrzeżenie jeśli dane są starsze niż 3 godziny
+    if not df.empty:
+        age_hours = (time.time() - df.index[-1].timestamp()) / 3600
+        if age_hours > 3:
+            print(f"  ⚠ {symbol}: ostatnia świeca sprzed {age_hours:.0f}h — dane mogą być nieaktualne")
+
     return df
 
 

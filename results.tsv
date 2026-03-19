@@ -118,3 +118,7 @@ nr	data	score	sharpe_train	sharpe_val	return_train	return_val	max_dd_val	trades_
 117	2026-03-19 09:50	3.0762	5.064	5.193	3106.20%	656.91%	-10.76%	1338	LSTM_h384_3L_drop03_target24h_thr010_discrete_funding_1H
 118	2026-03-19 10:26	3.3810	5.420	5.430	3425.77%	761.21%	-10.21%	1260	LSTM_h384_3L_drop03_target24h_wd005_discrete_funding_1H
 119	2026-03-19 11:18	3.0858	6.037	5.311	4553.08%	629.08%	-9.99%	1245	LSTM_h384_3L_drop03_target24h_lb240_discrete_funding_1H
+120	2026-03-19 12:48	3.4564	5.466	5.561	3218.53%	760.01%	-10.40%	1263	LSTM_h384_3L_drop03_target24h_discrete_funding_1H
+121	2026-03-19 14:48	3.4564	5.466	5.561	3218.53%	760.01%	-10.40%	1263	LSTM_h384_3L_drop03_target24h_discrete_funding_1H
+122	2026-03-19 15:29	3.4564	5.466	5.561	3218.53%	760.01%	-10.40%	1263	LSTM_h384_3L_drop03_target24h_discrete_funding_1H
+123	2026-03-19 16:14	3.4564	5.466	5.561	3218.53%	760.01%	-10.40%	1263	LSTM_h384_3L_drop03_target24h_discrete_funding_1H
