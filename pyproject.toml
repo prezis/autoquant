@@ -1,0 +1,19 @@
+[project]
+name = "fibo-autoresearch"
+version = "0.1.0"
+description = "Autonomous Fibonacci strategy optimization — fork of karpathy/autoresearch via popek1990/autoquant"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
+    "yfinance>=0.2.40",
+    "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov"]
+gpu = ["torch>=2.5"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

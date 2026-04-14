@@ -4,3 +4,6 @@ __pycache__/
 run.log
 logi/
 *.zip
+data/cache/
+results.db
+*.parquet
