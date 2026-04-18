@@ -15,8 +15,9 @@ pd.set_option('future.no_silent_downcasting', True)
 from prepare import evaluate, plot_equity
 
 RESULTS_FILE = Path(__file__).parent / "results.tsv"
-OPIS = "LSTM_h384_3L_drop03_target24h_discrete_funding_1H"
+OPIS = "BiGRU_h384_3L_drop03_target24h_discrete_funding_ATR25_1H"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.backends.cudnn.enabled = False  # cuDNN init fails on RTX 5090, LSTM works fine without it
 LOOKBACK = 168  # 168 świec lookback (7 dni na 1H)
 SINGLE_SEED = 42  # jednolity seed dla wszystkich assetów (bez per-asset ensemble)
 
@@ -102,25 +103,28 @@ def atr_trailing_stop(close, atr_values, positions, multiplier=2.0,
 
 # ─── Sieci neuronowe ──────────────────────────────────────────────
 
-class SignalLSTM(nn.Module):
-    """LSTM do przetwarzania sekwencji wskaźników technicznych.
-    Input: (batch, seq_len=50, n_features) → Output: (batch,) confidence [-1,1]
+class SignalGRU(nn.Module):
+    """BiGRU do przetwarzania sekwencji wskaźników technicznych.
+    Input: (batch, seq_len=168, n_features) → Output: (batch,) confidence [-1,1]
+    GRU ma mniej parametrów niż LSTM (2 bramy zamiast 3), co może zmniejszyć overfitting.
+    Bidirectional pozwala modelowi widzieć kontekst z obu stron sekwencji.
     """
-    def __init__(self, n_features, hidden=256, n_layers=2, dropout=0.3):
+    def __init__(self, n_features, hidden=384, n_layers=3, dropout=0.3):
         super().__init__()
         self.input_bn = nn.BatchNorm1d(n_features)
-        self.lstm = nn.LSTM(
+        self.gru = nn.GRU(
             input_size=n_features, hidden_size=hidden, num_layers=n_layers,
             batch_first=True, dropout=dropout if n_layers > 1 else 0,
-            bidirectional=False)
+            bidirectional=True)
+        hidden_out = hidden * 2  # bidirectional doubles output size
         self.head = nn.Sequential(
-            nn.BatchNorm1d(hidden),
+            nn.BatchNorm1d(hidden_out),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(hidden, hidden // 4),
+            nn.Linear(hidden_out, hidden_out // 4),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden // 4, 1),
+            nn.Linear(hidden_out // 4, 1),
             nn.Tanh())
 
     def forward(self, x):
@@ -128,7 +132,7 @@ class SignalLSTM(nn.Module):
         # BatchNorm na features — transpose do (batch, features, seq_len) i z powrotem
         b, s, f = x.shape
         x = self.input_bn(x.transpose(1, 2)).transpose(1, 2)
-        out, _ = self.lstm(x)  # (batch, seq_len, hidden)
+        out, _ = self.gru(x)  # (batch, seq_len, hidden)
         last = out[:, -1, :]   # ostatni timestep: (batch, hidden)
         return self.head(last).squeeze(-1)
 
@@ -303,7 +307,7 @@ def train_lstm(features, targets, lookback=LOOKBACK, n_epochs=300, lr=0.002, see
     yt = torch.tensor(y_seq, device=DEVICE)
 
     n_features = X_seq.shape[2]
-    model = SignalLSTM(n_features=n_features, hidden=384, n_layers=3, dropout=0.3).to(DEVICE)
+    model = SignalGRU(n_features=n_features, hidden=384, n_layers=3, dropout=0.3).to(DEVICE)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.02)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs)
 
@@ -677,28 +681,28 @@ def _asset_id(df) -> str:
 
 
 def save_model(model_info, path: Path):
-    """Zapisuje model LSTM do pliku .pt"""
+    """Zapisuje model GRU do pliku .pt"""
     if model_info is None:
         return
     model, valid_idx, lookback = model_info
     torch.save({
         "state_dict": model.state_dict(),
         "n_features": model.input_bn.num_features,
-        "hidden": model.lstm.hidden_size,
-        "n_layers": model.lstm.num_layers,
-        "dropout": model.lstm.dropout,
+        "hidden": model.gru.hidden_size,
+        "n_layers": model.gru.num_layers,
+        "dropout": model.gru.dropout,
         "lookback": lookback,
         "valid_idx": valid_idx,
     }, path)
 
 
 def load_model(path: Path):
-    """Ładuje model LSTM z pliku .pt — zwraca model_info lub None przy błędzie."""
+    """Ładuje model GRU z pliku .pt — zwraca model_info lub None przy błędzie."""
     if not path.exists():
         return None
     try:
         data = torch.load(path, map_location=DEVICE, weights_only=False)
-        model = SignalLSTM(
+        model = SignalGRU(
             n_features=data["n_features"],
             hidden=data["hidden"],
             n_layers=data["n_layers"],
@@ -804,7 +808,7 @@ def strategy(df, context, model_cache_dir=None, model_retrain_hours=MODEL_RETRAI
 
     atr_val = atr(df, period=14)
     signals = atr_trailing_stop(close, atr_val, signals,
-                                multiplier=1.9, cooldown=24, profit_target_atr=3.0)
+                                multiplier=2.5, cooldown=12, profit_target_atr=4.0)
     return signals
 
 
