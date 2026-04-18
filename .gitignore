@@ -5,6 +5,7 @@ run.log
 logi/
 *.zip
 data/cache/
+data/ground_truth
 data/ground_truth/
 results.db
 *.parquet
